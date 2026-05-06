@@ -69,6 +69,8 @@ def main():
     parser = parse_cli_args()
     args, cli_overrides = parser.parse_known_args()
 
+    # if fine-grained cpu-offloading
+    os.environ["NVTE_CPU_OFFLOAD_V1"] = "1"
     if args.dump_env:
         _dump_env_rank0()
 
