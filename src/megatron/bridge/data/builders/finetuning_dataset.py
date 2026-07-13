@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import logging
+import os
+import time
 import warnings
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -31,6 +33,28 @@ from megatron.bridge.utils.common_utils import get_rank_safe, print_rank_0
 
 
 logger = logging.getLogger(__name__)
+
+
+def _refresh_directory_metadata(spec: str) -> None:
+    """Force a listdir on the nearest existing ancestor to bust stale NFS directory-cache entries.
+
+    On NFS filesystems (e.g. Isilon NFSv4.0) a node that did not write a
+    directory may cache a negative "not found" result for up to acdirmin
+    seconds (~30 s by default).  Calling os.listdir() on the nearest existing
+    ancestor forces the NFS client to issue GETATTR+READDIR to the server,
+    collapsing the negative-cache window within one RPC round-trip.
+    """
+    base = spec.split("*", 1)[0]
+    directory = Path(base if os.path.isdir(base) else os.path.dirname(base))
+    while True:
+        try:
+            os.listdir(directory)
+            return
+        except OSError:
+            parent = directory.parent
+            if parent == directory:
+                return
+            directory = parent
 
 
 class FinetuningDatasetBuilder:
@@ -272,12 +296,34 @@ class FinetuningDatasetBuilder:
 
         # Check if path exists - handle packed parquet specs differently
         if is_packed_parquet_spec(path_str):
-            # For packed parquet specs, check via resolution
-            try:
-                resolved = resolve_packed_parquet_paths(path_str)
-                path_exists = len(resolved) > 0
-            except ValueError:
-                path_exists = False
+            # On distributed NFS (e.g. Isilon NFSv4.0) a non-producer node can see
+            # stale directory metadata for ~30 s after rank 0 writes packed parquet
+            # files.  Retry with os.listdir() refresh to bust the negative cache.
+            # Budget: 10 attempts, linear back-off 1 s base => 1+2+...+9 = 45 s total.
+            _MAX_ATTEMPTS = 10
+            _BACKOFF_S = 1.0
+            path_exists = False
+            for _attempt in range(1, _MAX_ATTEMPTS + 1):
+                try:
+                    resolved = resolve_packed_parquet_paths(path_str)
+                except ValueError:
+                    resolved = []
+                if resolved:
+                    if _attempt > 1:
+                        logger.warning(
+                            "Packed Parquet spec %s resolved after %d attempt(s).",
+                            path_str, _attempt,
+                        )
+                    path_exists = True
+                    break
+                if _attempt < _MAX_ATTEMPTS:
+                    logger.warning(
+                        "Packed Parquet spec %s returned no files (attempt %d/%d); "
+                        "refreshing NFS directory metadata ...",
+                        path_str, _attempt, _MAX_ATTEMPTS,
+                    )
+                    _refresh_directory_metadata(path_str)
+                    time.sleep(_BACKOFF_S * _attempt)
         else:
             # Standard file/path existence check
             if MultiStorageClientFeature.is_enabled():
