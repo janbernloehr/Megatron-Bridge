@@ -165,6 +165,39 @@ def test_nemotron_3_nano_gb200_defers_vocab_size_to_training_tokenizer():
 
 
 @pytest.mark.parametrize(
+    ("module_name", "bf16_factory_name", "fp8cs_factory_name"),
+    [
+        pytest.param(
+            "megatron.bridge.perf_recipes.nemotronh.b200.nemotronh",
+            "nemotronh_56b_pretrain_256gpu_b200_bf16_config",
+            "nemotronh_56b_pretrain_256gpu_b200_fp8cs_config",
+            id="b200",
+        ),
+        pytest.param(
+            "megatron.bridge.perf_recipes.nemotronh.gb300.nemotronh",
+            "nemotronh_56b_pretrain_256gpu_gb300_bf16_config",
+            "nemotronh_56b_pretrain_256gpu_gb300_fp8cs_config",
+            id="gb300",
+        ),
+    ],
+)
+def test_nemotronh_56b_256gpu_bf16_recipes_scale_global_batch_size(
+    module_name: str,
+    bf16_factory_name: str,
+    fp8cs_factory_name: str,
+) -> None:
+    """The 256-GPU BF16 recipes preserve the 64-GPU gradient accumulation count."""
+    module = importlib.import_module(module_name)
+    bf16_cfg = getattr(module, bf16_factory_name)()
+    fp8cs_cfg = getattr(module, fp8cs_factory_name)()
+    data_parallel_size = bf16_cfg.get_data_parallel_size(256)
+
+    assert data_parallel_size == 128
+    assert bf16_cfg.train.global_batch_size == fp8cs_cfg.train.global_batch_size == 768
+    assert bf16_cfg.train.global_batch_size // (bf16_cfg.train.micro_batch_size * data_parallel_size) == 6
+
+
+@pytest.mark.parametrize(
     ("module_name", "factory_name", "has_comm_overlap"),
     [
         pytest.param(
