@@ -146,91 +146,36 @@ class TestTokenizers:
 
         assert mock_snapshot_download.call_args.kwargs["local_files_only"] is hf_hub_offline
 
-    @patch("megatron.bridge.training.tokenizers.tokenizer.build_mcore_tokenizer")
-    @patch("huggingface_hub.snapshot_download")
-    def test_build_hf_tokenizer_resolves_revision_offline(
-        self, mock_snapshot_download, mock_build_mcore_tokenizer, monkeypatch
-    ):
-        monkeypatch.setattr("huggingface_hub.constants.HF_HUB_OFFLINE", True)
-        mock_snapshot_download.return_value = "/cache/snapshots/b968826d"
-        mock_build_mcore_tokenizer.return_value = sentinel.tokenizer
-        config = TokenizerConfig(
-            tokenizer_type="HuggingFaceTokenizer",
-            tokenizer_model="Qwen/Qwen3-8B",
-            hf_tokenizer_kwargs={"revision": "b968826d"},
-        )
-        tokenizer = build_tokenizer(config)
-        assert tokenizer is sentinel.tokenizer
-        mock_snapshot_download.assert_called_once()
-        assert mock_snapshot_download.call_args.kwargs["local_files_only"] is True
-
-    @patch("megatron.bridge.training.tokenizers.tokenizer.build_mcore_tokenizer")
-    @patch("huggingface_hub.snapshot_download")
-    def test_build_hf_tokenizer_resolves_revision_offline_fallback(
-        self, mock_snapshot_download, mock_build_mcore_tokenizer, monkeypatch
-    ):
-        monkeypatch.setattr("huggingface_hub.constants.HF_HUB_OFFLINE", False)
-        from huggingface_hub.errors import OfflineModeIsEnabled
-
-        mock_snapshot_download.side_effect = [
-            OfflineModeIsEnabled("Cannot reach https://huggingface.co"),
-            "/cache/snapshots/b968826d",
-        ]
-        mock_build_mcore_tokenizer.return_value = sentinel.tokenizer
-        config = TokenizerConfig(
-            tokenizer_type="HuggingFaceTokenizer",
-            tokenizer_model="Qwen/Qwen3-8B",
-            hf_tokenizer_kwargs={"revision": "b968826d"},
-        )
-        tokenizer = build_tokenizer(config)
-        assert tokenizer is sentinel.tokenizer
-        assert mock_snapshot_download.call_count == 2
-        assert mock_snapshot_download.call_args_list[0].kwargs["local_files_only"] is False
-        assert mock_snapshot_download.call_args_list[1].kwargs["local_files_only"] is True
-
-    @patch("megatron.bridge.training.tokenizers.tokenizer.build_mcore_tokenizer")
-    @patch("huggingface_hub.snapshot_download")
-    def test_build_hf_tokenizer_falls_back_to_cache_on_httpx_connect_error(
-        self, mock_snapshot_download, mock_build_mcore_tokenizer, monkeypatch
-    ):
-        # Online mode, but the connection is refused: huggingface_hub >= 1.x
-        # surfaces httpx.ConnectError, which is not a builtin ConnectionError,
-        # so the fallback to the local cache must catch the httpx base class.
-        import httpx
-
-        monkeypatch.setattr("huggingface_hub.constants.HF_HUB_OFFLINE", False)
-        mock_snapshot_download.side_effect = [
-            httpx.ConnectError("[Errno 111] Connection refused"),
-            "/cache/snapshots/b968826d",
-        ]
-        mock_build_mcore_tokenizer.return_value = sentinel.tokenizer
-        config = TokenizerConfig(
-            tokenizer_type="HuggingFaceTokenizer",
-            tokenizer_model="Qwen/Qwen3-8B",
-            hf_tokenizer_kwargs={"revision": "b968826d"},
-        )
-        tokenizer = build_tokenizer(config)
-        assert tokenizer is sentinel.tokenizer
-        assert mock_snapshot_download.call_count == 2
-        assert mock_snapshot_download.call_args_list[0].kwargs["local_files_only"] is False
-        assert mock_snapshot_download.call_args_list[1].kwargs["local_files_only"] is True
-
+    @pytest.mark.parametrize("hf_hub_offline", [False, True])
+    @pytest.mark.parametrize("local_files_only", [False, True])
     @patch("megatron.bridge.training.tokenizers.tokenizer.build_mcore_tokenizer")
     @patch("huggingface_hub.snapshot_download")
     def test_build_hf_tokenizer_resolves_revision_custom_local_files_only(
-        self, mock_snapshot_download, mock_build_mcore_tokenizer
+        self, mock_snapshot_download, mock_build_mcore_tokenizer, monkeypatch, hf_hub_offline, local_files_only
     ):
-        mock_snapshot_download.return_value = "/cache/snapshots/b968826d"
+        monkeypatch.setattr("huggingface_hub.constants.HF_HUB_OFFLINE", hf_hub_offline)
+        revision = "b968826d9c46dd6066d109eabc6255188de91218"  # pragma: allowlist secret
+        mock_snapshot_download.return_value = f"/cache/models--resolved/snapshots/{revision}"
         mock_build_mcore_tokenizer.return_value = sentinel.tokenizer
+        hf_tokenizer_kwargs = {"revision": revision, "local_files_only": local_files_only}
         config = TokenizerConfig(
             tokenizer_type="HuggingFaceTokenizer",
             tokenizer_model="Qwen/Qwen3-8B",
-            hf_tokenizer_kwargs={"revision": "b968826d", "local_files_only": True},
+            hf_tokenizer_kwargs=hf_tokenizer_kwargs.copy(),
         )
-        tokenizer = build_tokenizer(config)
-        assert tokenizer is sentinel.tokenizer
+
+        assert build_tokenizer(config) is sentinel.tokenizer
+
         mock_snapshot_download.assert_called_once()
-        assert mock_snapshot_download.call_args.kwargs["local_files_only"] is True
+        snapshot_kwargs = mock_snapshot_download.call_args.kwargs
+        assert snapshot_kwargs["repo_id"] == config.tokenizer_model
+        assert snapshot_kwargs["revision"] == revision
+        assert snapshot_kwargs["local_files_only"] is local_files_only
+        resolved_config = mock_build_mcore_tokenizer.call_args.args[0]
+        assert resolved_config is not config
+        assert resolved_config.tokenizer_model == mock_snapshot_download.return_value
+        assert config.tokenizer_model == "Qwen/Qwen3-8B"
+        assert config.hf_tokenizer_kwargs == hf_tokenizer_kwargs
 
     @patch("megatron.bridge.training.tokenizers.tokenizer.build_mcore_tokenizer")
     @patch("huggingface_hub.snapshot_download")
